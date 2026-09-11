@@ -51,8 +51,6 @@
 #include <QTimer>
 #include <QtMath>
 
-#include <QShowEvent>
-
 #include <algorithm>
 
 
@@ -423,7 +421,7 @@ private:
 qpwgraph_matrix::qpwgraph_matrix (
 	qpwgraph_canvas *canvas, QWidget *parent )
 	: QWidget(parent), m_canvas(canvas),
-		m_filter_toolbar(nullptr), m_grid(nullptr), m_dirty(false)
+		m_filter_toolbar(nullptr), m_grid(nullptr)
 {
 	m_filter_toolbar = new QToolBar();
 	m_filter_toolbar->setMovable(false);
@@ -451,9 +449,16 @@ qpwgraph_matrix::qpwgraph_matrix (
 
 	// Observe the canvas' own live graph notifications, without
 	// touching/duplicating its (or the engine's) connection logic
-	// in any way...
+	// in any way. Note: qpwgraph_canvas::addItem() emits updated(),
+	// not added(), for a node whose position is being restored from
+	// previously-saved canvas state -- which, for a returning node on
+	// a long-used, real patchbay, is the common case, not the
+	// exception -- so both must be treated the same way here.
 	QObject::connect(m_canvas,
 		SIGNAL(added(qpwgraph_node *)),
+		SLOT(added(qpwgraph_node *)));
+	QObject::connect(m_canvas,
+		SIGNAL(updated(qpwgraph_node *)),
 		SLOT(added(qpwgraph_node *)));
 	QObject::connect(m_canvas,
 		SIGNAL(removed(qpwgraph_node *)),
@@ -480,12 +485,16 @@ qpwgraph_canvas *qpwgraph_matrix::canvas (void) const
 
 
 // Full grid (re)build, on demand.
+//
+// Always rebuilds immediately rather than deferring while hidden: a
+// visibility-gated deferral is exactly what let the very first nodes
+// discovered at startup slip by unnoticed (the tab can be made current,
+// and thus shown, well before the top-level window itself is shown,
+// which resets any pending "dirty" flag against an as yet empty graph
+// with nothing left afterwards to prompt a fresh rebuild).
 void qpwgraph_matrix::updateView (void)
 {
-	if (QWidget::isVisible())
-		rebuild();
-	else
-		m_dirty = true;
+	rebuild();
 }
 
 
@@ -522,11 +531,9 @@ void qpwgraph_matrix::filterActionToggled ( bool on )
 }
 
 
-// Deferred/on-demand grid (re)builder.
+// On-demand grid (re)builder.
 void qpwgraph_matrix::rebuild (void)
 {
-	m_dirty = false;
-
 	m_row_lines.clear();
 	m_col_lines.clear();
 
@@ -705,16 +712,6 @@ void qpwgraph_matrix::addPortTypeFilter (
 	m_filter_toolbar->addAction(action);
 	m_filter_actions.insert(port_type, action);
 	m_filter_types.insert(port_type, enabled);
-}
-
-
-// Widget event handler.
-void qpwgraph_matrix::showEvent ( QShowEvent *event )
-{
-	QWidget::showEvent(event);
-
-	if (m_dirty)
-		rebuild();
 }
 
 

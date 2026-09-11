@@ -39,8 +39,6 @@ class qpwgraph_port;
 class QToolBar;
 class QAction;
 
-class QShowEvent;
-
 
 //----------------------------------------------------------------------------
 // qpwgraph_matrix -- Connection matrix/grid alternate view.
@@ -87,9 +85,6 @@ protected:
 
 	// Register a filter toggle-action for a port-type, if not already.
 	void addPortTypeFilter(uint port_type, const QString& text, bool enabled);
-
-	// Widget event handler.
-	void showEvent(QShowEvent *event);
 
 	// Lightweight node:port address, as a stand-in for a live
 	// qpwgraph_port pointer that may not stay valid across event-loop
@@ -217,9 +212,6 @@ private:
 	// Port-type filter state and actions.
 	QHash<uint, bool>     m_filter_types;
 	QHash<uint, QAction *> m_filter_actions;
-
-	// Deferred rebuild flag (while not visible/current).
-	bool m_dirty;
 };
 
 

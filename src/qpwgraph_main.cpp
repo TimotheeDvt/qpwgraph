@@ -259,6 +259,7 @@ qpwgraph_main::qpwgraph_main (
 	// the very same graph canvas' live node/port/link data...
 	m_matrix = new qpwgraph_matrix(m_ui.graphCanvas);
 	m_ui.MainViewTabs->addTab(m_matrix, tr("&Matrix"));
+	m_ui.MainViewTabs->setCurrentWidget(m_matrix);
 
 	// Some actions surely need those
 	// shortcuts firmly attached...
