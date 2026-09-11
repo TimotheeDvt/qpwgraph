@@ -759,6 +759,20 @@ QString qpwgraph_matrix::commonPrefix ( const QStringList& names )
 			return QString();
 	}
 
+	// Keep meaningful port-category words intact even when they land
+	// inside the redundant prefix -- never strip through one of these.
+	static const char * const kKeepWords[] = {
+		"aux", "monitor", "capture", "playback", "input", "output"
+	};
+	const QString lower = prefix.toLower();
+	int cut = prefix.length();
+	for (size_t i = 0; i < sizeof(kKeepWords) / sizeof(kKeepWords[0]); ++i) {
+		const int pos = lower.indexOf(QLatin1String(kKeepWords[i]));
+		if (pos >= 0 && pos < cut)
+			cut = pos;
+	}
+	prefix.truncate(cut);
+
 	return prefix;
 }
 
