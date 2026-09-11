@@ -39,6 +39,7 @@ class qpwgraph_connect;
 
 class qpwgraph_systray;
 class qpwgraph_thumb;
+class qpwgraph_matrix;
 
 class QEvent;
 class QResizeEvent;
@@ -268,6 +269,8 @@ private:
 	QActionGroup *m_thumb_mode;
 	qpwgraph_thumb *m_thumb;
 	int m_thumb_update;
+
+	qpwgraph_matrix *m_matrix;
 };
 
 

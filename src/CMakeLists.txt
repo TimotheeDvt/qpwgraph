@@ -30,6 +30,7 @@ set (HEADERS
   qpwgraph_patchman.h
   qpwgraph_systray.h
   qpwgraph_thumb.h
+  qpwgraph_matrix.h
   qpwgraph_main.h
   qpwgraph_options.h
   qpwgraph_palette.h
@@ -52,6 +53,7 @@ set (SOURCES
   qpwgraph_patchman.cpp
   qpwgraph_systray.cpp
   qpwgraph_thumb.cpp
+  qpwgraph_matrix.cpp
   qpwgraph_main.cpp
   qpwgraph_options.cpp
   qpwgraph_palette.cpp

@@ -149,6 +149,12 @@ public:
 	void emitConnectPorts(
 		qpwgraph_port *port1, qpwgraph_port *port2, bool is_connect);
 
+	// Port (dis)connection command (public entry-point for
+	// alternate views, eg. matrix; goes through the same
+	// undo/redo command stack as the canvas' own interaction).
+	void connectPorts(
+		qpwgraph_port *port1, qpwgraph_port *port2, bool is_connect);
+
 	// Port (dis)connections notifiers.
 	void emitConnected(qpwgraph_port *port1, qpwgraph_port *port2);
 	void emitDisconnected(qpwgraph_port *port1, qpwgraph_port *port2);
@@ -282,10 +288,6 @@ protected:
 
 	// Item finder (internal).
 	qpwgraph_item *itemAt(const QPointF& pos) const;
-
-	// Port (dis)connection commands.
-	void connectPorts(
-		qpwgraph_port *port1, qpwgraph_port *port2, bool is_connect);
 
 	// Mouse event handlers.
 	void mousePressEvent(QMouseEvent *event);

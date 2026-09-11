@@ -33,6 +33,7 @@
 #include "qpwgraph_patchman.h"
 #include "qpwgraph_systray.h"
 #include "qpwgraph_thumb.h"
+#include "qpwgraph_matrix.h"
 
 #include <pipewire/pipewire.h>
 
@@ -253,6 +254,11 @@ qpwgraph_main::qpwgraph_main (
 	QObject::connect(m_ui.graphCanvas,
 		SIGNAL(changed()),
 		SLOT(changed()));
+
+	// Matrix/grid alternate view (second tab), observing
+	// the very same graph canvas' live node/port/link data...
+	m_matrix = new qpwgraph_matrix(m_ui.graphCanvas);
+	m_ui.MainViewTabs->addTab(m_matrix, tr("&Matrix"));
 
 	// Some actions surely need those
 	// shortcuts firmly attached...

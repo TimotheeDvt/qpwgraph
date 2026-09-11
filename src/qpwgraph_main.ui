@@ -45,7 +45,16 @@
      <number>0</number>
     </property>
     <item>
-     <widget class="qpwgraph_canvas" name="graphCanvas"/>
+     <widget class="QTabWidget" name="MainViewTabs">
+      <property name="documentMode">
+       <bool>true</bool>
+      </property>
+      <widget class="qpwgraph_canvas" name="graphCanvas">
+       <attribute name="title">
+        <string>&amp;Graph</string>
+       </attribute>
+      </widget>
+     </widget>
     </item>
    </layout>
   </widget>
