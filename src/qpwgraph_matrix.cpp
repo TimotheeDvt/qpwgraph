@@ -155,16 +155,16 @@ protected:
 		for (int row = row0; row < row1; ++row) {
 			const int y = row * m_cell_h - voff;
 			for (int col = col0; col < col1; ++col) {
+				const qpwgraph_matrix::CellInfo info = m_matrix->cellInfo(row, col);
+				if (!info.valid)
+					continue; // folder-heading row/column -- no cell here at all
 				const int x = grid_x0 + col * m_cell_w - hoff;
 				const QRect cell_rect(x, y, m_cell_w, m_cell_h);
-				const qpwgraph_matrix::CellInfo info = m_matrix->cellInfo(row, col);
-				if (info.valid) {
-					if (info.incompatible) {
-						painter.fillRect(cell_rect.adjusted(1, 1, -1, -1),
-							QBrush(line_color, Qt::Dense7Pattern));
-					} else if (info.connected) {
-						painter.fillRect(cell_rect.adjusted(1, 1, -1, -1), info.color);
-					}
+				if (info.incompatible) {
+					painter.fillRect(cell_rect.adjusted(1, 1, -1, -1),
+						QBrush(line_color, Qt::Dense7Pattern));
+				} else if (info.connected) {
+					painter.fillRect(cell_rect.adjusted(1, 1, -1, -1), info.color);
 				}
 				painter.setPen(line_color);
 				painter.drawRect(cell_rect.adjusted(0, 0, -1, -1));
@@ -512,97 +512,146 @@ void qpwgraph_matrix::rebuild (void)
 	m_row_lines.clear();
 	m_col_lines.clear();
 
-	QList<qpwgraph_node *> nodes;
+	// Per-node port gathering, done once; the row and column axes are
+	// then ordered independently (see below) since a node's outputs
+	// and inputs may not agree on whether the group is "empty".
+	struct NodeInfo
+	{
+		qpwgraph_node *node;
+		QList<qpwgraph_port *> row_ports;
+		QList<qpwgraph_port *> col_ports;
+		bool row_has_link = false;
+		bool col_has_link = false;
+	};
+
+	QList<NodeInfo> infos;
 
 	if (m_canvas && m_canvas->scene()) {
 		const QList<QGraphicsItem *>& items = m_canvas->scene()->items();
 		foreach (QGraphicsItem *item, items) {
-			if (item->type() == qpwgraph_node::Type) {
-				qpwgraph_node *node = static_cast<qpwgraph_node *> (item);
-				if (node && !(m_canvas->isFilterNodesEnabled()
-						&& m_canvas->isFilterNodes(node->nodeName())))
-					nodes.append(node);
+			if (item->type() != qpwgraph_node::Type)
+				continue;
+			qpwgraph_node *node = static_cast<qpwgraph_node *> (item);
+			if (node == nullptr)
+				continue;
+			if (m_canvas->isFilterNodesEnabled()
+				&& m_canvas->isFilterNodes(node->nodeName()))
+				continue;
+			NodeInfo info;
+			info.node = node;
+			foreach (qpwgraph_port *port, node->ports()) {
+				if (!isPortTypeEnabled(port->portType()))
+					continue;
+				if (port->isOutput()) {
+					info.row_ports.append(port);
+					if (!port->connects().isEmpty())
+						info.row_has_link = true;
+				} else
+				if (port->isInput()) {
+					info.col_ports.append(port);
+					if (!port->connects().isEmpty())
+						info.col_has_link = true;
+				}
+			}
+			infos.append(info);
+		}
+	}
+
+	// Output rows: empty groups first, linked ones pushed to the
+	// bottom (each bucket alphabetical). Input columns: the reverse
+	// -- linked groups first, empty ones after.
+	QList<int> row_order, col_order;
+	for (int i = 0; i < infos.count(); ++i) {
+		if (!infos.at(i).row_ports.isEmpty())
+			row_order.append(i);
+		if (!infos.at(i).col_ports.isEmpty())
+			col_order.append(i);
+	}
+
+	std::sort(row_order.begin(), row_order.end(),
+		[&infos](int a, int b) -> bool
+		{
+			const NodeInfo& ia = infos.at(a);
+			const NodeInfo& ib = infos.at(b);
+			if (ia.row_has_link != ib.row_has_link)
+				return !ia.row_has_link;
+			return QString::compare(ia.node->nodeName(),
+				ib.node->nodeName(), Qt::CaseInsensitive) < 0;
+		});
+
+	std::sort(col_order.begin(), col_order.end(),
+		[&infos](int a, int b) -> bool
+		{
+			const NodeInfo& ia = infos.at(a);
+			const NodeInfo& ib = infos.at(b);
+			if (ia.col_has_link != ib.col_has_link)
+				return ia.col_has_link;
+			return QString::compare(ia.node->nodeName(),
+				ib.node->nodeName(), Qt::CaseInsensitive) < 0;
+		});
+
+	foreach (int i, row_order) {
+		const NodeInfo& info = infos.at(i);
+		qpwgraph_node *node = info.node;
+
+		// Folder/group heading -- never a real port, never
+		// clickable, whether collapsed or expanded.
+		const bool row_collapsed = isRowCollapsed(
+			node->nodeId(), node->nodeType(), !info.row_has_link);
+		Line header;
+		header.node_name = node->nodeName();
+		header.node_id = node->nodeId();
+		header.node_type = node->nodeType();
+		header.group_first = true;
+		header.collapsed = row_collapsed;
+		m_row_lines.append(header);
+
+		if (!row_collapsed) {
+			QStringList names;
+			foreach (qpwgraph_port *port, info.row_ports)
+				names.append(port->portName());
+			const QString prefix = commonPrefix(names);
+			foreach (qpwgraph_port *port, info.row_ports) {
+				Line line;
+				line.node_name = node->nodeName();
+				line.node_id = node->nodeId();
+				line.node_type = node->nodeType();
+				line.is_port = true;
+				line.port = refOf(port);
+				line.port_name = port->portName().mid(prefix.length());
+				m_row_lines.append(line);
 			}
 		}
 	}
 
-	std::sort(nodes.begin(), nodes.end(),
-		[](qpwgraph_node *n1, qpwgraph_node *n2) -> bool
-		{
-			return QString::compare(
-				n1->nodeName(), n2->nodeName(), Qt::CaseInsensitive) < 0;
-		});
+	foreach (int i, col_order) {
+		const NodeInfo& info = infos.at(i);
+		qpwgraph_node *node = info.node;
 
-	foreach (qpwgraph_node *node, nodes) {
-		QList<qpwgraph_port *> row_ports, col_ports;
-		bool row_has_link = false;
-		bool col_has_link = false;
-
-		foreach (qpwgraph_port *port, node->ports()) {
-			if (!isPortTypeEnabled(port->portType()))
-				continue;
-			if (port->isOutput()) {
-				row_ports.append(port);
-				if (!port->connects().isEmpty())
-					row_has_link = true;
-			} else
-			if (port->isInput()) {
-				col_ports.append(port);
-				if (!port->connects().isEmpty())
-					col_has_link = true;
-			}
-		}
-
-		const bool row_collapsed = isRowCollapsed(
-			node->nodeId(), node->nodeType(), !row_has_link);
 		const bool col_collapsed = isColCollapsed(
-			node->nodeId(), node->nodeType(), !col_has_link);
+			node->nodeId(), node->nodeType(), !info.col_has_link);
+		Line header;
+		header.node_name = node->nodeName();
+		header.node_id = node->nodeId();
+		header.node_type = node->nodeType();
+		header.group_first = true;
+		header.collapsed = col_collapsed;
+		m_col_lines.append(header);
 
-		if (!row_ports.isEmpty()) {
-			// Folder/group heading -- never a real port, never
-			// clickable, whether collapsed or expanded.
-			Line header;
-			header.node_name = node->nodeName();
-			header.node_id = node->nodeId();
-			header.node_type = node->nodeType();
-			header.group_first = true;
-			header.collapsed = row_collapsed;
-			m_row_lines.append(header);
-
-			if (!row_collapsed) {
-				foreach (qpwgraph_port *port, row_ports) {
-					Line line;
-					line.node_name = node->nodeName();
-					line.node_id = node->nodeId();
-					line.node_type = node->nodeType();
-					line.is_port = true;
-					line.port = refOf(port);
-					line.port_name = port->portName();
-					m_row_lines.append(line);
-				}
-			}
-		}
-
-		if (!col_ports.isEmpty()) {
-			Line header;
-			header.node_name = node->nodeName();
-			header.node_id = node->nodeId();
-			header.node_type = node->nodeType();
-			header.group_first = true;
-			header.collapsed = col_collapsed;
-			m_col_lines.append(header);
-
-			if (!col_collapsed) {
-				foreach (qpwgraph_port *port, col_ports) {
-					Line line;
-					line.node_name = node->nodeName();
-					line.node_id = node->nodeId();
-					line.node_type = node->nodeType();
-					line.is_port = true;
-					line.port = refOf(port);
-					line.port_name = port->portName();
-					m_col_lines.append(line);
-				}
+		if (!col_collapsed) {
+			QStringList names;
+			foreach (qpwgraph_port *port, info.col_ports)
+				names.append(port->portName());
+			const QString prefix = commonPrefix(names);
+			foreach (qpwgraph_port *port, info.col_ports) {
+				Line line;
+				line.node_name = node->nodeName();
+				line.node_id = node->nodeId();
+				line.node_type = node->nodeType();
+				line.is_port = true;
+				line.port = refOf(port);
+				line.port_name = port->portName().mid(prefix.length());
+				m_col_lines.append(line);
 			}
 		}
 	}
@@ -684,6 +733,33 @@ qpwgraph_port *qpwgraph_matrix::resolvePort (
 		return nullptr;
 
 	return node->findPort(ref.port_id, mode, ref.port_type);
+}
+
+
+// Longest common prefix shared by every name in the list.
+QString qpwgraph_matrix::commonPrefix ( const QStringList& names )
+{
+	if (names.count() < 2)
+		return QString();
+
+	QString prefix = names.first();
+	foreach (const QString& name, names) {
+		int len = 0;
+		const int max_len = qMin(prefix.length(), name.length());
+		while (len < max_len && prefix.at(len) == name.at(len))
+			++len;
+		prefix.truncate(len);
+		if (prefix.isEmpty())
+			return prefix;
+	}
+
+	// Never strip a name down to nothing (eg. "AUX1" alongside "AUX10").
+	foreach (const QString& name, names) {
+		if (name.length() <= prefix.length())
+			return QString();
+	}
+
+	return prefix;
 }
 
 

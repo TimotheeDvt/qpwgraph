@@ -26,6 +26,7 @@
 #include <QList>
 #include <QHash>
 #include <QColor>
+#include <QStringList>
 
 #include "qpwgraph_item.h"
 
@@ -129,6 +130,12 @@ protected:
 		bool    group_first = false;
 		bool    collapsed = false;
 	};
+
+	// Longest common prefix shared by every name in the list, or an
+	// empty string if fewer than two names, or if stripping it would
+	// leave any single name empty (a name that is itself a prefix of
+	// another, eg. "AUX1" alongside "AUX10").
+	static QString commonPrefix(const QStringList& names);
 
 	// Address of a (still live) port.
 	PortRef refOf(qpwgraph_port *port) const;
