@@ -37,6 +37,10 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QHostInfo>
+#if defined(Q_OS_UNIX)
+#include <csignal>
+#include <cerrno>
+#endif
 #endif
 
 
@@ -203,6 +207,17 @@ bool qpwgraph_application::setupServer (void)
 #if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
 	const QNativeIpcKey native_key
 		= QSharedMemory::legacyNativeKey(m_unique);
+#if defined(Q_OS_UNIX)
+	// Clear out a stale handle left behind by a previous session
+	// before really trying to create/attach below -- otherwise a
+	// leftover handle with no live segment behind it can leave
+	// create() reporting AlreadyExists while attach() simultaneously
+	// reports NotFound, so this process can become neither server nor
+	// client and just quits, forcing a second launch to work.
+	m_memory = new QSharedMemory(native_key);
+	m_memory->attach();
+	delete m_memory;
+#endif
 	m_memory = new QSharedMemory(native_key);
 #else
 #if defined(Q_OS_UNIX)
@@ -228,8 +243,23 @@ bool qpwgraph_application::setupServer (void)
 	if (m_memory->attach()) {
 		m_memory->lock(); // maybe not necessary?
 		Data *data = static_cast<Data *> (m_memory->data());
-		if (data)
+		if (data) {
 			is_server = (data->pid == pid);
+#if defined(Q_OS_UNIX)
+			// The shared-memory lock can also outlive the process
+			// that created it (eg. one that exited without fully
+			// releasing it), leaving the next launch to find a
+			// stale pid and wrongly defer to it as if it were a
+			// live instance. Reclaim the lock outright once the
+			// recorded pid is confirmed dead, rather than
+			// deferring to a phantom.
+			if (!is_server && data->pid > 0
+				&& ::kill(pid_t(data->pid), 0) != 0 && errno == ESRCH) {
+				data->pid = pid;
+				is_server = true;
+			}
+#endif
+		}
 		m_memory->unlock();
 	}
 
