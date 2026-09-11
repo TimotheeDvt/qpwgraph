@@ -193,9 +193,18 @@ protected:
 		painter.drawLine(m_row_header_w, 0, m_row_header_w, grid_y1);
 		painter.restore();
 
+		// --- corner filler (bottom-left) -- painted before the footer
+		// labels below, since the first columns' diagonal text trails
+		// far enough left to run right through this corner.
+		const QRect corner_rect(0, grid_y1, m_row_header_w, m_col_footer_h);
+		painter.fillRect(corner_rect, head_bg);
+
 		// --- column footers (bottom, fixed y, scrolls with cols) ---
 		painter.save();
-		painter.setClipRect(QRect(grid_x0, grid_y1, grid_w, m_col_footer_h));
+		// Clipped only to the footer's y-band, not to grid_x0 on the
+		// left: a column's label trails backwards from its anchor and
+		// nearby columns need room to bleed into the corner above.
+		painter.setClipRect(QRect(0, grid_y1, vp.width(), m_col_footer_h));
 		painter.fillRect(QRect(grid_x0, grid_y1, grid_w, m_col_footer_h), head_bg);
 		painter.setPen(text_color);
 		const qreal max_len = qMax(qreal(20),
@@ -209,21 +218,19 @@ protected:
 			const QFontMetrics lfm(font);
 			const QString text = lfm.elidedText(
 				m_matrix->lineLabel(line), Qt::ElideRight, int(max_len));
+			const int text_width = lfm.horizontalAdvance(text);
 			painter.save();
-			painter.translate(x, grid_y1 + m_col_footer_h - 4);
+			// Anchor the *end* of the text at the column, right at the
+			// grid boundary, with the text trailing away from it into
+			// the footer -- not the other way around.
+			painter.translate(x, grid_y1 + 6);
 			painter.rotate(-kFooterAngle);
-			painter.drawText(QPoint(0, 0), text);
+			painter.drawText(QPoint(-text_width, 0), text);
 			painter.restore();
 		}
 		painter.setPen(line_color);
 		painter.drawLine(grid_x0, grid_y1, vp.width(), grid_y1);
 		painter.restore();
-
-		// --- corner filler (bottom-left) ---
-		const QRect corner_rect(0, grid_y1, m_row_header_w, m_col_footer_h);
-		painter.fillRect(corner_rect, head_bg);
-		painter.setPen(line_color);
-		painter.drawRect(corner_rect.adjusted(0, 0, -1, -1));
 	}
 
 	void resizeEvent(QResizeEvent *event)
@@ -323,24 +330,35 @@ private:
 		const int rows = m_matrix->m_row_lines.count();
 		const int cols = m_matrix->m_col_lines.count();
 
+		// Footer band -- checked first, since its rotated labels can
+		// bleed left under the row-header column into the corner, so
+		// x alone can't tell it apart from the row-header/cell area.
+		if (pos.y() >= grid_y1) {
+			if (pos.y() >= grid_y1 + m_col_footer_h)
+				return hr;
+			// Walk back from the click, along the same direction the
+			// label text runs, until we reach the anchor line -- the
+			// x we land on there is the column's anchor x.
+			const qreal rad = qDegreesToRadians(kFooterAngle);
+			const qreal anchor_y = grid_y1 + 6;
+			const qreal t = (qreal(pos.y()) - anchor_y) / qSin(rad);
+			const qreal anchor_x = pos.x() + t * qCos(rad);
+			const int col = int(qFloor(
+				(anchor_x - m_row_header_w + hoff) / m_cell_w));
+			if (col >= 0 && col < cols) {
+				hr.region = ColFooter;
+				hr.index1 = col;
+			}
+			return hr;
+		}
+
 		if (pos.x() < m_row_header_w) {
-			if (pos.y() < 0 || pos.y() >= grid_y1)
+			if (pos.y() < 0)
 				return hr;
 			const int row = (pos.y() + voff) / m_cell_h;
 			if (row >= 0 && row < rows) {
 				hr.region = RowHeader;
 				hr.index1 = row;
-			}
-			return hr;
-		}
-
-		if (pos.y() >= grid_y1) {
-			if (pos.y() >= grid_y1 + m_col_footer_h)
-				return hr;
-			const int col = (pos.x() - m_row_header_w + hoff) / m_cell_w;
-			if (col >= 0 && col < cols) {
-				hr.region = ColFooter;
-				hr.index1 = col;
 			}
 			return hr;
 		}
