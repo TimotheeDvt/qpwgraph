@@ -291,6 +291,9 @@ protected:
 			else
 			if (hr.region == ColFooter)
 				text = m_matrix->lineLabel(m_matrix->m_col_lines.at(hr.index1)).trimmed();
+			else
+			if (hr.region == Cell)
+				text = m_matrix->cellTooltip(hr.index1, hr.index2);
 			if (text.isEmpty())
 				QToolTip::hideText();
 			else
@@ -555,51 +558,51 @@ void qpwgraph_matrix::rebuild (void)
 		const bool col_collapsed = isColCollapsed(
 			node->nodeId(), node->nodeType(), !col_has_link);
 
-		for (int i = 0; i < row_ports.count(); ++i) {
-			qpwgraph_port *port = row_ports.at(i);
-			Line line;
-			line.node_name = node->nodeName();
-			line.node_id = node->nodeId();
-			line.node_type = node->nodeType();
-			if (i == 0) {
-				line.group_first = true;
-				line.collapsed = row_collapsed;
-				if (!row_collapsed) {
+		if (!row_ports.isEmpty()) {
+			// Folder/group heading -- never a real port, never
+			// clickable, whether collapsed or expanded.
+			Line header;
+			header.node_name = node->nodeName();
+			header.node_id = node->nodeId();
+			header.node_type = node->nodeType();
+			header.group_first = true;
+			header.collapsed = row_collapsed;
+			m_row_lines.append(header);
+
+			if (!row_collapsed) {
+				foreach (qpwgraph_port *port, row_ports) {
+					Line line;
+					line.node_name = node->nodeName();
+					line.node_id = node->nodeId();
+					line.node_type = node->nodeType();
 					line.is_port = true;
 					line.port = refOf(port);
 					line.port_name = port->portName();
+					m_row_lines.append(line);
 				}
-				m_row_lines.append(line);
-			} else
-			if (!row_collapsed) {
-				line.is_port = true;
-				line.port = refOf(port);
-				line.port_name = port->portName();
-				m_row_lines.append(line);
 			}
 		}
 
-		for (int i = 0; i < col_ports.count(); ++i) {
-			qpwgraph_port *port = col_ports.at(i);
-			Line line;
-			line.node_name = node->nodeName();
-			line.node_id = node->nodeId();
-			line.node_type = node->nodeType();
-			if (i == 0) {
-				line.group_first = true;
-				line.collapsed = col_collapsed;
-				if (!col_collapsed) {
+		if (!col_ports.isEmpty()) {
+			Line header;
+			header.node_name = node->nodeName();
+			header.node_id = node->nodeId();
+			header.node_type = node->nodeType();
+			header.group_first = true;
+			header.collapsed = col_collapsed;
+			m_col_lines.append(header);
+
+			if (!col_collapsed) {
+				foreach (qpwgraph_port *port, col_ports) {
+					Line line;
+					line.node_name = node->nodeName();
+					line.node_id = node->nodeId();
+					line.node_type = node->nodeType();
 					line.is_port = true;
 					line.port = refOf(port);
 					line.port_name = port->portName();
+					m_col_lines.append(line);
 				}
-				m_col_lines.append(line);
-			} else
-			if (!col_collapsed) {
-				line.is_port = true;
-				line.port = refOf(port);
-				line.port_name = port->portName();
-				m_col_lines.append(line);
 			}
 		}
 	}
@@ -813,15 +816,33 @@ qpwgraph_matrix::CellInfo qpwgraph_matrix::cellInfo ( int row, int col ) const
 // Display text for a row/column line.
 QString qpwgraph_matrix::lineLabel ( const Line& line ) const
 {
+	// Group/folder heading line -- never a real port, whether
+	// collapsed or expanded.
 	if (line.group_first) {
-		QString text = (line.collapsed ? QStringLiteral("▸ ") : QStringLiteral("▾ "))
+		return (line.collapsed ? QStringLiteral("▸ ") : QStringLiteral("▾ "))
 			+ line.node_name;
-		if (line.is_port)
-			text += QStringLiteral("  •  ") + line.port_name;
-		return text;
 	} else {
 		return QStringLiteral("     ") + line.port_name;
 	}
+}
+
+
+// Hover tooltip text for a grid cell ("input -> output").
+QString qpwgraph_matrix::cellTooltip ( int row, int col ) const
+{
+	if (row < 0 || row >= m_row_lines.count())
+		return QString();
+	if (col < 0 || col >= m_col_lines.count())
+		return QString();
+
+	const Line& rline = m_row_lines.at(row); // output
+	const Line& cline = m_col_lines.at(col); // input
+	if (!rline.is_port || !cline.is_port)
+		return QString();
+
+	return cline.node_name + ':' + cline.port_name
+		+ QStringLiteral(" -> ")
+		+ rline.node_name + ':' + rline.port_name;
 }
 
 

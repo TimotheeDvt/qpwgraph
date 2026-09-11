@@ -177,6 +177,11 @@ protected:
 	// and painting, so they can never disagree).
 	QString lineLabel(const Line& line) const;
 
+	// Hover tooltip text for a grid cell ("input -> output"), empty
+	// if the cell isn't a real port x port pair (eg. a folder-heading
+	// row/column).
+	QString cellTooltip(int row, int col) const;
+
 private:
 
 	// Custom-painted grid/header view (outputs down the left, inputs
