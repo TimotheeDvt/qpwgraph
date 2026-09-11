@@ -37,16 +37,362 @@
 #include <QToolBar>
 #include <QAction>
 
-#include <QTableWidget>
-#include <QHeaderView>
+#include <QAbstractScrollArea>
+#include <QScrollBar>
 
-#include <QBrush>
-#include <QFont>
-#include <QPalette>
+#include <QPainter>
+#include <QFontMetrics>
+
+#include <QMouseEvent>
+#include <QResizeEvent>
+#include <QHelpEvent>
+#include <QToolTip>
+
+#include <QTimer>
+#include <QtMath>
 
 #include <QShowEvent>
 
 #include <algorithm>
+
+
+//----------------------------------------------------------------------------
+// qpwgraph_matrix::Grid -- Custom-painted grid/header view.
+//
+// Outputs are listed down the left (horizontal labels, as before);
+// inputs run along the bottom, rotated at an angle (Ardour-style).
+// Row/column headers stay pinned to the viewport edges as the grid
+// scrolls beneath/beside them, like a spreadsheet's frozen headers.
+
+class qpwgraph_matrix::Grid : public QAbstractScrollArea
+{
+public:
+
+	// Constructor.
+	Grid(qpwgraph_matrix *matrix)
+		: QAbstractScrollArea(nullptr), m_matrix(matrix),
+			m_cell_w(20), m_cell_h(20),
+			m_row_header_w(120), m_col_footer_h(100),
+			m_press_region(None), m_press_index1(-1), m_press_index2(-1)
+	{
+		QAbstractScrollArea::viewport()->setMouseTracking(true);
+		QAbstractScrollArea::setFocusPolicy(Qt::NoFocus);
+		QAbstractScrollArea::setFrameShape(QFrame::NoFrame);
+
+		// Connection state (which cells are lit up) can change from
+		// underneath us at any time, without any canvas-level signal
+		// to hook (only whole nodes get added/removed notifications);
+		// a cheap periodic repaint keeps cells honest -- paint always
+		// re-resolves ports fresh, so this is just a redraw, not a
+		// rebuild.
+		QTimer *timer = new QTimer(this);
+		QObject::connect(timer, &QTimer::timeout, this, [this] {
+			if (QAbstractScrollArea::isVisible())
+				QAbstractScrollArea::viewport()->update();
+		});
+		timer->start(500);
+	}
+
+	// Recompute header/footer extents and scrollbar ranges, then redraw.
+	void updateLayout()
+	{
+		const QFontMetrics fm(font());
+
+		int row_w = 0;
+		foreach (const Line& line, m_matrix->m_row_lines)
+			row_w = qMax(row_w, fm.horizontalAdvance(m_matrix->lineLabel(line)));
+		m_row_header_w = qBound(80, row_w + 16, 280);
+
+		int col_w = 0;
+		foreach (const Line& line, m_matrix->m_col_lines)
+			col_w = qMax(col_w, fm.horizontalAdvance(m_matrix->lineLabel(line)));
+		const qreal footer_extent = col_w * qSin(qDegreesToRadians(kFooterAngle));
+		m_col_footer_h = qBound(60, int(footer_extent) + 20, 220);
+
+		updateScrollBars();
+
+		QAbstractScrollArea::viewport()->update();
+	}
+
+protected:
+
+	// Grid painter.
+	void paintEvent(QPaintEvent *)
+	{
+		QPainter painter(QAbstractScrollArea::viewport());
+		painter.setRenderHint(QPainter::Antialiasing, true);
+
+		const QPalette& pal = QAbstractScrollArea::palette();
+		const QColor text_color = pal.color(QPalette::Text);
+		const QColor line_color = pal.color(QPalette::Mid);
+		const QColor head_bg    = pal.color(QPalette::Button);
+		const QColor grid_bg    = pal.color(QPalette::Base);
+
+		const QRect vp = QAbstractScrollArea::viewport()->rect();
+		painter.fillRect(vp, grid_bg);
+
+		const int rows = m_matrix->m_row_lines.count();
+		const int cols = m_matrix->m_col_lines.count();
+
+		const int grid_x0 = m_row_header_w;
+		const int grid_y1 = gridBottom();
+		const int grid_w  = qMax(0, vp.width() - grid_x0);
+
+		const int hoff = QAbstractScrollArea::horizontalScrollBar()->value();
+		const int voff = QAbstractScrollArea::verticalScrollBar()->value();
+
+		const QFont base_font = painter.font();
+		const QFontMetrics fm(base_font);
+
+		const int row0 = qMax(0, voff / m_cell_h);
+		const int row1 = qMin(rows, (voff + grid_y1) / m_cell_h + 1);
+		const int col0 = qMax(0, hoff / m_cell_w);
+		const int col1 = qMin(cols, (hoff + grid_w) / m_cell_w + 1);
+
+		// --- grid cells ---
+		painter.save();
+		painter.setClipRect(QRect(grid_x0, 0, grid_w, grid_y1));
+		for (int row = row0; row < row1; ++row) {
+			const int y = row * m_cell_h - voff;
+			for (int col = col0; col < col1; ++col) {
+				const int x = grid_x0 + col * m_cell_w - hoff;
+				const QRect cell_rect(x, y, m_cell_w, m_cell_h);
+				const qpwgraph_matrix::CellInfo info = m_matrix->cellInfo(row, col);
+				if (info.valid) {
+					if (info.incompatible) {
+						painter.fillRect(cell_rect.adjusted(1, 1, -1, -1),
+							QBrush(line_color, Qt::Dense7Pattern));
+					} else if (info.connected) {
+						painter.fillRect(cell_rect.adjusted(1, 1, -1, -1), info.color);
+					}
+				}
+				painter.setPen(line_color);
+				painter.drawRect(cell_rect.adjusted(0, 0, -1, -1));
+			}
+		}
+		painter.restore();
+
+		// --- row headers (left, fixed x, scrolls with rows) ---
+		painter.save();
+		painter.setClipRect(QRect(0, 0, m_row_header_w, grid_y1));
+		painter.fillRect(QRect(0, 0, m_row_header_w, grid_y1), head_bg);
+		painter.setPen(text_color);
+		for (int row = row0; row < row1; ++row) {
+			const int y = row * m_cell_h - voff;
+			const Line& line = m_matrix->m_row_lines.at(row);
+			QFont font = base_font;
+			font.setBold(line.group_first);
+			painter.setFont(font);
+			const QFontMetrics lfm(font);
+			const QString text = lfm.elidedText(
+				m_matrix->lineLabel(line), Qt::ElideRight, m_row_header_w - 8);
+			painter.drawText(QRect(4, y, m_row_header_w - 6, m_cell_h),
+				Qt::AlignVCenter | Qt::AlignLeft, text);
+		}
+		painter.setPen(line_color);
+		painter.drawLine(m_row_header_w, 0, m_row_header_w, grid_y1);
+		painter.restore();
+
+		// --- column footers (bottom, fixed y, scrolls with cols) ---
+		painter.save();
+		painter.setClipRect(QRect(grid_x0, grid_y1, grid_w, m_col_footer_h));
+		painter.fillRect(QRect(grid_x0, grid_y1, grid_w, m_col_footer_h), head_bg);
+		painter.setPen(text_color);
+		const qreal max_len = qMax(qreal(20),
+			m_col_footer_h / qSin(qDegreesToRadians(kFooterAngle)) - 8);
+		for (int col = col0; col < col1; ++col) {
+			const int x = grid_x0 + col * m_cell_w - hoff + m_cell_w / 2;
+			const Line& line = m_matrix->m_col_lines.at(col);
+			QFont font = base_font;
+			font.setBold(line.group_first);
+			painter.setFont(font);
+			const QFontMetrics lfm(font);
+			const QString text = lfm.elidedText(
+				m_matrix->lineLabel(line), Qt::ElideRight, int(max_len));
+			painter.save();
+			painter.translate(x, grid_y1 + m_col_footer_h - 4);
+			painter.rotate(-kFooterAngle);
+			painter.drawText(QPoint(0, 0), text);
+			painter.restore();
+		}
+		painter.setPen(line_color);
+		painter.drawLine(grid_x0, grid_y1, vp.width(), grid_y1);
+		painter.restore();
+
+		// --- corner filler (bottom-left) ---
+		const QRect corner_rect(0, grid_y1, m_row_header_w, m_col_footer_h);
+		painter.fillRect(corner_rect, head_bg);
+		painter.setPen(line_color);
+		painter.drawRect(corner_rect.adjusted(0, 0, -1, -1));
+	}
+
+	void resizeEvent(QResizeEvent *event)
+	{
+		QAbstractScrollArea::resizeEvent(event);
+		updateScrollBars();
+	}
+
+	void scrollContentsBy(int, int)
+	{
+		QAbstractScrollArea::viewport()->update();
+	}
+
+	void mousePressEvent(QMouseEvent *event)
+	{
+		if (event->button() == Qt::LeftButton) {
+			const HitResult hr = hitTest(event->pos());
+			m_press_region = hr.region;
+			m_press_index1 = hr.index1;
+			m_press_index2 = hr.index2;
+		}
+		QAbstractScrollArea::mousePressEvent(event);
+	}
+
+	void mouseReleaseEvent(QMouseEvent *event)
+	{
+		if (event->button() == Qt::LeftButton && m_press_region != None) {
+			const HitResult hr = hitTest(event->pos());
+			if (hr.region == m_press_region
+				&& hr.index1 == m_press_index1
+				&& hr.index2 == m_press_index2) {
+				switch (hr.region) {
+				case RowHeader: {
+					const Line& line = m_matrix->m_row_lines.at(hr.index1);
+					if (line.group_first)
+						m_matrix->toggleRowGroup(line.node_id, line.node_type);
+					break;
+				}
+				case ColFooter: {
+					const Line& line = m_matrix->m_col_lines.at(hr.index1);
+					if (line.group_first)
+						m_matrix->toggleColGroup(line.node_id, line.node_type);
+					break;
+				}
+				case Cell:
+					m_matrix->activateCell(hr.index1, hr.index2);
+					break;
+				default:
+					break;
+				}
+			}
+		}
+		m_press_region = None;
+		QAbstractScrollArea::mouseReleaseEvent(event);
+	}
+
+	bool viewportEvent(QEvent *event)
+	{
+		if (event->type() == QEvent::ToolTip) {
+			QHelpEvent *help = static_cast<QHelpEvent *> (event);
+			const HitResult hr = hitTest(help->pos());
+			QString text;
+			if (hr.region == RowHeader)
+				text = m_matrix->lineLabel(m_matrix->m_row_lines.at(hr.index1)).trimmed();
+			else
+			if (hr.region == ColFooter)
+				text = m_matrix->lineLabel(m_matrix->m_col_lines.at(hr.index1)).trimmed();
+			if (text.isEmpty())
+				QToolTip::hideText();
+			else
+				QToolTip::showText(help->globalPos(), text, this);
+			return true;
+		}
+		return QAbstractScrollArea::viewportEvent(event);
+	}
+
+private:
+
+	// Header/footer angle (degrees), diagonal destination labels.
+	static constexpr qreal kFooterAngle = 60.0;
+
+	enum Region { None = 0, RowHeader, ColFooter, Cell };
+
+	struct HitResult { Region region; int index1; int index2; };
+
+	HitResult hitTest(const QPoint& pos) const
+	{
+		HitResult hr{ None, -1, -1 };
+
+		const int grid_y1 = gridBottom();
+		const int hoff = QAbstractScrollArea::horizontalScrollBar()->value();
+		const int voff = QAbstractScrollArea::verticalScrollBar()->value();
+
+		const int rows = m_matrix->m_row_lines.count();
+		const int cols = m_matrix->m_col_lines.count();
+
+		if (pos.x() < m_row_header_w) {
+			if (pos.y() < 0 || pos.y() >= grid_y1)
+				return hr;
+			const int row = (pos.y() + voff) / m_cell_h;
+			if (row >= 0 && row < rows) {
+				hr.region = RowHeader;
+				hr.index1 = row;
+			}
+			return hr;
+		}
+
+		if (pos.y() >= grid_y1) {
+			if (pos.y() >= grid_y1 + m_col_footer_h)
+				return hr;
+			const int col = (pos.x() - m_row_header_w + hoff) / m_cell_w;
+			if (col >= 0 && col < cols) {
+				hr.region = ColFooter;
+				hr.index1 = col;
+			}
+			return hr;
+		}
+
+		const int row = (pos.y() + voff) / m_cell_h;
+		const int col = (pos.x() - m_row_header_w + hoff) / m_cell_w;
+		if (row >= 0 && row < rows && col >= 0 && col < cols) {
+			hr.region = Cell;
+			hr.index1 = row;
+			hr.index2 = col;
+		}
+		return hr;
+	}
+
+	// Screen-y of the boundary between the cell grid and the footer:
+	// glued right below the actual row content (like Ardour), not
+	// stretched down to the viewport edge when there's only a short
+	// list of rows -- but still pinned to the viewport bottom (usual
+	// frozen-footer behaviour) once there's enough content to scroll.
+	int gridBottom() const
+	{
+		const QRect vp = QAbstractScrollArea::viewport()->rect();
+		const int avail_h = qMax(0, vp.height() - m_col_footer_h);
+		const int content_h = m_matrix->m_row_lines.count() * m_cell_h;
+		const int voff = QAbstractScrollArea::verticalScrollBar()->value();
+		return qMin(avail_h, qMax(0, content_h - voff));
+	}
+
+	void updateScrollBars()
+	{
+		const QRect vp = QAbstractScrollArea::viewport()->rect();
+		const int grid_w = qMax(0, vp.width()  - m_row_header_w);
+		const int grid_h = qMax(0, vp.height() - m_col_footer_h);
+
+		const int content_w = m_matrix->m_col_lines.count() * m_cell_w;
+		const int content_h = m_matrix->m_row_lines.count() * m_cell_h;
+
+		QAbstractScrollArea::horizontalScrollBar()->setRange(0, qMax(0, content_w - grid_w));
+		QAbstractScrollArea::horizontalScrollBar()->setPageStep(qMax(1, grid_w));
+		QAbstractScrollArea::verticalScrollBar()->setRange(0, qMax(0, content_h - grid_h));
+		QAbstractScrollArea::verticalScrollBar()->setPageStep(qMax(1, grid_h));
+	}
+
+	// Instance variables.
+	qpwgraph_matrix *m_matrix;
+
+	int m_cell_w;
+	int m_cell_h;
+	int m_row_header_w;
+	int m_col_footer_h;
+
+	Region m_press_region;
+	int m_press_index1;
+	int m_press_index2;
+};
 
 
 //----------------------------------------------------------------------------
@@ -56,7 +402,7 @@
 qpwgraph_matrix::qpwgraph_matrix (
 	qpwgraph_canvas *canvas, QWidget *parent )
 	: QWidget(parent), m_canvas(canvas),
-		m_filter_toolbar(nullptr), m_table(nullptr), m_dirty(false)
+		m_filter_toolbar(nullptr), m_grid(nullptr), m_dirty(false)
 {
 	m_filter_toolbar = new QToolBar();
 	m_filter_toolbar->setMovable(false);
@@ -64,57 +410,33 @@ qpwgraph_matrix::qpwgraph_matrix (
 	m_filter_toolbar->setToolButtonStyle(Qt::ToolButtonTextOnly);
 
 	// Register the known port-types as toggle-able filters...
-	addPortTypeFilter(qpwgraph_pipewire::audioPortType(), tr("Audio"));
-	addPortTypeFilter(qpwgraph_pipewire::midiPortType(),  tr("MIDI"));
-	addPortTypeFilter(qpwgraph_pipewire::midi2PortType(), tr("MIDI2"));
-	addPortTypeFilter(qpwgraph_pipewire::videoPortType(), tr("Video"));
-	addPortTypeFilter(qpwgraph_pipewire::otherPortType(), tr("Other"));
+	addPortTypeFilter(qpwgraph_pipewire::audioPortType(), tr("Audio"), true);
+	addPortTypeFilter(qpwgraph_pipewire::midiPortType(),  tr("MIDI"), false);
+	addPortTypeFilter(qpwgraph_pipewire::midi2PortType(), tr("MIDI2"), false);
+	addPortTypeFilter(qpwgraph_pipewire::videoPortType(), tr("Video"), false);
+	addPortTypeFilter(qpwgraph_pipewire::otherPortType(), tr("Other"), false);
 #ifdef CONFIG_ALSA_MIDI
-	addPortTypeFilter(qpwgraph_alsamidi::midiPortType(),  tr("ALSA MIDI"));
+	addPortTypeFilter(qpwgraph_alsamidi::midiPortType(),  tr("ALSA MIDI"), false);
 #endif
 
-	m_table = new QTableWidget();
-	m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-	m_table->setSelectionMode(QAbstractItemView::NoSelection);
-	m_table->setAlternatingRowColors(false);
-	m_table->setCornerButtonEnabled(false);
-	m_table->setShowGrid(true);
-
-	QHeaderView *hheader = m_table->horizontalHeader();
-	hheader->setSectionResizeMode(QHeaderView::Interactive);
-	hheader->setDefaultSectionSize(28);
-	hheader->setMinimumSectionSize(24);
-
-	QHeaderView *vheader = m_table->verticalHeader();
-	vheader->setSectionResizeMode(QHeaderView::Interactive);
-	vheader->setDefaultSectionSize(20);
-
-	QObject::connect(m_table,
-		SIGNAL(cellClicked(int, int)),
-		SLOT(cellClicked(int, int)));
+	m_grid = new Grid(this);
 
 	QVBoxLayout *layout = new QVBoxLayout();
 	layout->setContentsMargins(0, 0, 0, 0);
 	layout->setSpacing(0);
 	layout->addWidget(m_filter_toolbar);
-	layout->addWidget(m_table, 1);
+	layout->addWidget(m_grid, 1);
 	QWidget::setLayout(layout);
 
-	// Observe the canvas' own live graph notifications,
-	// without touching/duplicating its (or the engine's)
-	// connection logic in any way...
+	// Observe the canvas' own live graph notifications, without
+	// touching/duplicating its (or the engine's) connection logic
+	// in any way...
 	QObject::connect(m_canvas,
 		SIGNAL(added(qpwgraph_node *)),
 		SLOT(added(qpwgraph_node *)));
 	QObject::connect(m_canvas,
 		SIGNAL(removed(qpwgraph_node *)),
 		SLOT(removed(qpwgraph_node *)));
-	QObject::connect(m_canvas,
-		SIGNAL(connected(qpwgraph_port *, qpwgraph_port *)),
-		SLOT(connected(qpwgraph_port *, qpwgraph_port *)));
-	QObject::connect(m_canvas,
-		SIGNAL(disconnected(qpwgraph_port *, qpwgraph_port *)),
-		SLOT(disconnected(qpwgraph_port *, qpwgraph_port *)));
 	QObject::connect(m_canvas,
 		SIGNAL(renamed(qpwgraph_item *, const QString&)),
 		SLOT(renamed(qpwgraph_item *, const QString&)));
@@ -166,27 +488,6 @@ void qpwgraph_matrix::renamed ( qpwgraph_item *, const QString& )
 }
 
 
-// Canvas port (dis)connection notifications.
-//
-// Note: these fire as soon as the (dis)connection is requested/queued,
-// well before the actual PipeWire/ALSA link is confirmed by the engine
-// (which only happens asynchronously, on the next registry round-trip).
-// So the cell state is set optimistically here from the notification
-// itself, not by (yet) querying qpwgraph_port::findConnect(); any later
-// engine-side rejection or race gets reconciled on the next rebuild().
-//
-void qpwgraph_matrix::connected ( qpwgraph_port *port1, qpwgraph_port *port2 )
-{
-	updateCell(port1, port2, true);
-}
-
-
-void qpwgraph_matrix::disconnected ( qpwgraph_port *port1, qpwgraph_port *port2 )
-{
-	updateCell(port1, port2, false);
-}
-
-
 // Port-type filter toggle slot.
 void qpwgraph_matrix::filterActionToggled ( bool on )
 {
@@ -200,51 +501,13 @@ void qpwgraph_matrix::filterActionToggled ( bool on )
 }
 
 
-// Grid cell click slot.
-void qpwgraph_matrix::cellClicked ( int row, int column )
-{
-	if (row < 0 || row >= m_row_ports.count())
-		return;
-	if (column < 0 || column >= m_col_ports.count())
-		return;
-
-	// Re-resolve to live ports, as the ones the grid was last
-	// built from may since have been destroyed and recreated by
-	// the engine's own periodic graph reconciliation (updateItems),
-	// even for a logically unchanged port...
-	qpwgraph_port *port1 = resolvePort(
-		m_row_ports.at(row), qpwgraph_item::Output);
-	qpwgraph_port *port2 = resolvePort(
-		m_col_ports.at(column), qpwgraph_item::Input);
-
-	if (port1 == nullptr || port2 == nullptr)
-		return;
-	if (port1->portType() != port2->portType())
-		return;
-
-	const bool is_connect = (port1->findConnect(port2) == nullptr);
-
-	// Goes through the very same command/undo-stack, patchbay
-	// bookkeeping and (dis)connected notifications the graph
-	// canvas itself uses on a drag-connect gesture...
-	if (m_canvas)
-		m_canvas->connectPorts(port1, port2, is_connect);
-}
-
-
 // Deferred/on-demand grid (re)builder.
 void qpwgraph_matrix::rebuild (void)
 {
 	m_dirty = false;
 
-	m_table->setUpdatesEnabled(false);
-
-	m_table->clearContents();
-	m_table->setRowCount(0);
-	m_table->setColumnCount(0);
-
-	m_row_ports.clear();
-	m_col_ports.clear();
+	m_row_lines.clear();
+	m_col_lines.clear();
 
 	QList<qpwgraph_node *> nodes;
 
@@ -267,116 +530,128 @@ void qpwgraph_matrix::rebuild (void)
 				n1->nodeName(), n2->nodeName(), Qt::CaseInsensitive) < 0;
 		});
 
-	// Live port pointers, valid only for the (synchronous) remainder
-	// of this call -- never stored past this method's return; only
-	// their lightweight PortRef address goes into the member lists.
-	QList<qpwgraph_port *> row_live;
-	QList<qpwgraph_port *> col_live;
-
 	foreach (qpwgraph_node *node, nodes) {
+		QList<qpwgraph_port *> row_ports, col_ports;
+		bool row_has_link = false;
+		bool col_has_link = false;
+
 		foreach (qpwgraph_port *port, node->ports()) {
 			if (!isPortTypeEnabled(port->portType()))
 				continue;
-			if (port->isOutput())
-				row_live.append(port);
-			else
-			if (port->isInput())
-				col_live.append(port);
-		}
-	}
-
-	m_table->setRowCount(row_live.count());
-	m_table->setColumnCount(col_live.count());
-
-	qpwgraph_node *last_row_node = nullptr;
-	qpwgraph_node *last_col_node = nullptr;
-
-	for (int row = 0; row < row_live.count(); ++row) {
-		qpwgraph_port *port = row_live.at(row);
-		qpwgraph_node *node = port->portNode();
-		const QString label = node->nodeName()
-			+ "  •  " + port->portName();
-		QTableWidgetItem *hitem = new QTableWidgetItem(label);
-		hitem->setToolTip(label);
-		if (node != last_row_node) {
-			QFont font = hitem->font();
-			font.setBold(true);
-			hitem->setFont(font);
-			last_row_node = node;
-		}
-		m_table->setVerticalHeaderItem(row, hitem);
-		m_row_ports.append(refOf(port));
-	}
-
-	for (int col = 0; col < col_live.count(); ++col) {
-		qpwgraph_port *port = col_live.at(col);
-		qpwgraph_node *node = port->portNode();
-		const QString label = node->nodeName()
-			+ "  •  " + port->portName();
-		QTableWidgetItem *hitem = new QTableWidgetItem(label);
-		hitem->setToolTip(label);
-		if (node != last_col_node) {
-			QFont font = hitem->font();
-			font.setBold(true);
-			hitem->setFont(font);
-			last_col_node = node;
-		}
-		m_table->setHorizontalHeaderItem(col, hitem);
-		m_col_ports.append(refOf(port));
-	}
-
-	for (int row = 0; row < row_live.count(); ++row) {
-		qpwgraph_port *port1 = row_live.at(row);
-		for (int col = 0; col < col_live.count(); ++col) {
-			qpwgraph_port *port2 = col_live.at(col);
-			QTableWidgetItem *item = new QTableWidgetItem();
-			item->setTextAlignment(Qt::AlignCenter);
-			if (port1->portType() != port2->portType()) {
-				item->setFlags(item->flags()
-					& ~(Qt::ItemIsEnabled | Qt::ItemIsSelectable));
-				item->setBackground(QBrush(
-					m_table->palette().color(QPalette::Mid),
-					Qt::Dense7Pattern));
-			} else {
-				item->setFlags((item->flags() | Qt::ItemIsEnabled)
-					& ~Qt::ItemIsSelectable);
-				if (port1->findConnect(port2))
-					item->setBackground(m_canvas->portTypeColor(port1->portType()));
+			if (port->isOutput()) {
+				row_ports.append(port);
+				if (!port->connects().isEmpty())
+					row_has_link = true;
+			} else
+			if (port->isInput()) {
+				col_ports.append(port);
+				if (!port->connects().isEmpty())
+					col_has_link = true;
 			}
-			m_table->setItem(row, col, item);
+		}
+
+		const bool row_collapsed = isRowCollapsed(
+			node->nodeId(), node->nodeType(), !row_has_link);
+		const bool col_collapsed = isColCollapsed(
+			node->nodeId(), node->nodeType(), !col_has_link);
+
+		for (int i = 0; i < row_ports.count(); ++i) {
+			qpwgraph_port *port = row_ports.at(i);
+			Line line;
+			line.node_name = node->nodeName();
+			line.node_id = node->nodeId();
+			line.node_type = node->nodeType();
+			if (i == 0) {
+				line.group_first = true;
+				line.collapsed = row_collapsed;
+				if (!row_collapsed) {
+					line.is_port = true;
+					line.port = refOf(port);
+					line.port_name = port->portName();
+				}
+				m_row_lines.append(line);
+			} else
+			if (!row_collapsed) {
+				line.is_port = true;
+				line.port = refOf(port);
+				line.port_name = port->portName();
+				m_row_lines.append(line);
+			}
+		}
+
+		for (int i = 0; i < col_ports.count(); ++i) {
+			qpwgraph_port *port = col_ports.at(i);
+			Line line;
+			line.node_name = node->nodeName();
+			line.node_id = node->nodeId();
+			line.node_type = node->nodeType();
+			if (i == 0) {
+				line.group_first = true;
+				line.collapsed = col_collapsed;
+				if (!col_collapsed) {
+					line.is_port = true;
+					line.port = refOf(port);
+					line.port_name = port->portName();
+				}
+				m_col_lines.append(line);
+			} else
+			if (!col_collapsed) {
+				line.is_port = true;
+				line.port = refOf(port);
+				line.port_name = port->portName();
+				m_col_lines.append(line);
+			}
 		}
 	}
 
-	m_table->setUpdatesEnabled(true);
+	if (m_grid)
+		m_grid->updateLayout();
 }
 
 
-// Single-cell state updater (no full rebuild).
-void qpwgraph_matrix::updateCell (
-	qpwgraph_port *port1, qpwgraph_port *port2, bool is_connect )
+// Port-type filter inquirer.
+bool qpwgraph_matrix::isPortTypeEnabled ( uint port_type ) const
 {
-	const int row = m_row_ports.indexOf(refOf(port1));
-	if (row < 0)
-		return;
-	const int col = m_col_ports.indexOf(refOf(port2));
-	if (col < 0)
+	return m_filter_types.value(port_type, true);
+}
+
+
+// Register a filter toggle-action for a port-type, if not already.
+void qpwgraph_matrix::addPortTypeFilter (
+	uint port_type, const QString& text, bool enabled )
+{
+	if (m_filter_actions.contains(port_type))
 		return;
 
-	QTableWidgetItem *item = m_table->item(row, col);
-	if (item == nullptr)
-		return;
+	QAction *action = new QAction(text, m_filter_toolbar);
+	action->setCheckable(true);
+	action->setChecked(enabled);
+	action->setData(port_type);
 
-	if (is_connect)
-		item->setBackground(m_canvas->portTypeColor(port1->portType()));
-	else
-		item->setBackground(QBrush());
+	QObject::connect(action,
+		SIGNAL(toggled(bool)),
+		SLOT(filterActionToggled(bool)));
+
+	m_filter_toolbar->addAction(action);
+	m_filter_actions.insert(port_type, action);
+	m_filter_types.insert(port_type, enabled);
+}
+
+
+// Widget event handler.
+void qpwgraph_matrix::showEvent ( QShowEvent *event )
+{
+	QWidget::showEvent(event);
+
+	if (m_dirty)
+		rebuild();
 }
 
 
 // Address of a (still live) port.
 qpwgraph_matrix::PortRef qpwgraph_matrix::refOf ( qpwgraph_port *port ) const
 {
-	PortRef ref{};
+	PortRef ref;
 
 	if (port) {
 		qpwgraph_node *node = port->portNode();
@@ -409,42 +684,144 @@ qpwgraph_port *qpwgraph_matrix::resolvePort (
 }
 
 
-// Port-type filter inquirer.
-bool qpwgraph_matrix::isPortTypeEnabled ( uint port_type ) const
+// Node group collapse-state key/helpers.
+quint64 qpwgraph_matrix::nodeKey ( uint node_id, uint node_type )
 {
-	return m_filter_types.value(port_type, true);
+	return (quint64(node_type) << 32) | quint64(node_id);
 }
 
 
-// Register a filter toggle-action for a port-type, if not already.
-void qpwgraph_matrix::addPortTypeFilter (
-	uint port_type, const QString& text )
+bool qpwgraph_matrix::isRowCollapsed (
+	uint node_id, uint node_type, bool auto_collapsed ) const
 {
-	if (m_filter_actions.contains(port_type))
+	return m_row_collapsed_user.value(nodeKey(node_id, node_type), auto_collapsed);
+}
+
+
+bool qpwgraph_matrix::isColCollapsed (
+	uint node_id, uint node_type, bool auto_collapsed ) const
+{
+	return m_col_collapsed_user.value(nodeKey(node_id, node_type), auto_collapsed);
+}
+
+
+void qpwgraph_matrix::toggleRowGroup ( uint node_id, uint node_type )
+{
+	bool collapsed = false;
+	foreach (const Line& line, m_row_lines) {
+		if (line.group_first
+			&& line.node_id == node_id && line.node_type == node_type) {
+			collapsed = line.collapsed;
+			break;
+		}
+	}
+
+	m_row_collapsed_user.insert(nodeKey(node_id, node_type), !collapsed);
+
+	rebuild();
+}
+
+
+void qpwgraph_matrix::toggleColGroup ( uint node_id, uint node_type )
+{
+	bool collapsed = false;
+	foreach (const Line& line, m_col_lines) {
+		if (line.group_first
+			&& line.node_id == node_id && line.node_type == node_type) {
+			collapsed = line.collapsed;
+			break;
+		}
+	}
+
+	m_col_collapsed_user.insert(nodeKey(node_id, node_type), !collapsed);
+
+	rebuild();
+}
+
+
+// Cell activation (called by the Grid on a port x port cell click).
+void qpwgraph_matrix::activateCell ( int row, int col )
+{
+	if (row < 0 || row >= m_row_lines.count())
+		return;
+	if (col < 0 || col >= m_col_lines.count())
 		return;
 
-	QAction *action = new QAction(text, m_filter_toolbar);
-	action->setCheckable(true);
-	action->setChecked(true);
-	action->setData(port_type);
+	const Line& rline = m_row_lines.at(row);
+	const Line& cline = m_col_lines.at(col);
+	if (!rline.is_port || !cline.is_port)
+		return;
 
-	QObject::connect(action,
-		SIGNAL(toggled(bool)),
-		SLOT(filterActionToggled(bool)));
+	// Re-resolve to live ports, as the ones the grid was last built
+	// from may since have been destroyed and recreated by the engine's
+	// own periodic graph reconciliation, even for a logically unchanged
+	// port...
+	qpwgraph_port *port1 = resolvePort(rline.port, qpwgraph_item::Output);
+	qpwgraph_port *port2 = resolvePort(cline.port, qpwgraph_item::Input);
 
-	m_filter_toolbar->addAction(action);
-	m_filter_actions.insert(port_type, action);
-	m_filter_types.insert(port_type, true);
+	if (port1 == nullptr || port2 == nullptr)
+		return;
+	if (port1->portType() != port2->portType())
+		return;
+
+	const bool is_connect = (port1->findConnect(port2) == nullptr);
+
+	// Goes through the very same command/undo-stack, patchbay
+	// bookkeeping and (dis)connected notifications the graph canvas
+	// itself uses on a drag-connect gesture...
+	if (m_canvas)
+		m_canvas->connectPorts(port1, port2, is_connect);
 }
 
 
-// Widget event handler.
-void qpwgraph_matrix::showEvent ( QShowEvent *event )
+// Cell paint/hit-test info, resolved fresh (never cached).
+qpwgraph_matrix::CellInfo qpwgraph_matrix::cellInfo ( int row, int col ) const
 {
-	QWidget::showEvent(event);
+	CellInfo info;
 
-	if (m_dirty)
-		rebuild();
+	if (row < 0 || row >= m_row_lines.count())
+		return info;
+	if (col < 0 || col >= m_col_lines.count())
+		return info;
+
+	const Line& rline = m_row_lines.at(row);
+	const Line& cline = m_col_lines.at(col);
+	if (!rline.is_port || !cline.is_port)
+		return info;
+
+	qpwgraph_port *port1 = resolvePort(rline.port, qpwgraph_item::Output);
+	qpwgraph_port *port2 = resolvePort(cline.port, qpwgraph_item::Input);
+	if (port1 == nullptr || port2 == nullptr)
+		return info;
+
+	info.valid = true;
+
+	if (port1->portType() != port2->portType()) {
+		info.incompatible = true;
+		return info;
+	}
+
+	if (port1->findConnect(port2)) {
+		info.connected = true;
+		info.color = m_canvas->portTypeColor(port1->portType());
+	}
+
+	return info;
+}
+
+
+// Display text for a row/column line.
+QString qpwgraph_matrix::lineLabel ( const Line& line ) const
+{
+	if (line.group_first) {
+		QString text = (line.collapsed ? QStringLiteral("▸ ") : QStringLiteral("▾ "))
+			+ line.node_name;
+		if (line.is_port)
+			text += QStringLiteral("  •  ") + line.port_name;
+		return text;
+	} else {
+		return QStringLiteral("     ") + line.port_name;
+	}
 }
 
 
